@@ -1,0 +1,5 @@
+build/
+install/
+log/
+.vscode
+nx2app_log.txt

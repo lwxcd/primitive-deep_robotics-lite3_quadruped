@@ -1,0 +1,25 @@
+manifestVersion: 1
+
+package:
+  name: com.robonix.lite3.quadruped
+  version: 0.1.0
+  vendor: robonix
+  description: Lite3 quadruped ROS primitive driver wrapper
+  license: Apache-2.0
+
+# cap_id is what shows up in `rbnx caps`. Convention: short name, same
+# across the three places it appears (atlas, package, manifest).
+capability_id: lite3_quadruped
+
+build: bash scripts/build.sh
+start: bash scripts/start.sh
+
+# Built-in chassis contracts (live under <robonix>/capabilities/primitive/chassis/).
+# We don't redeclare them locally — primitives reuse the canonical
+# contract surface. Only skills need package-local capabilities/.
+capabilities:
+  - name: robonix/primitive/chassis/driver
+  - name: robonix/primitive/chassis/move
+  - name: robonix/primitive/chassis/twist_in
+  - name: robonix/primitive/chassis/odom
+  - name: robonix/primitive/chassis/posture

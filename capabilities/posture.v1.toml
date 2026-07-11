@@ -1,0 +1,11 @@
+# Quadruped posture control — skill-type contract attached to the
+# lite3_quadruped primitive. The LLM calls this to switch the robot
+# between predefined body postures (stand, sit, crouch, walk-ready, …).
+[contract]
+id      = "robonix/primitive/chassis/posture"
+version = "1"
+kind    = "primitive"
+idl     = "quadruped/srv/SetPosture.srv"
+
+[mode]
+type = "rpc"
