@@ -53,8 +53,9 @@ then stop. **Not a continuous stream** — each call is a discrete burst.
 
 1. If `forward_m ≠ 0`: moves at `speed_mps` (default 0.2 m/s) for the
    calculated duration. Duration = `abs(forward_m) / speed_mps`.
-2. Else if `rotate_deg ≠ 0`: rotates at `ang_speed_rps` (default
-   0.6 rad/s ≈ 34.4°/s) for the calculated duration.
+2. Else if `rotate_deg ≠ 0`: rotates in place using `/leg_odom2` yaw as
+   closed-loop feedback. It slows near the target, stops within the configured
+   tolerance, and reports the measured angle or an odometry/timeout error.
 3. Else: raw velocity mode using `linear_x/y/z`, `angular_x/y/z` for
    `duration_sec` (defaults to 1.0 s if ≤ 0).
 
@@ -72,6 +73,7 @@ serialized as JSON in the `status` field.
 | `LITE3_QUADRUPED_SPEED_MPS` | `0.2` | forward/backward speed (m/s) |
 | `LITE3_QUADRUPED_ANG_SPEED_RPS` | `0.6` | rotation speed (rad/s) |
 | `LITE3_QUADRUPED_CMD_DURATION_SEC` | `1.0` | default duration for raw velocity mode |
+| `LITE3_ROTATE_TOLERANCE_DEG` | `3.0` | accepted closed-loop yaw error (degrees) |
 
 ## Required initialization
 

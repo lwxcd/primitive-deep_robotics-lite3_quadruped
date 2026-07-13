@@ -55,6 +55,10 @@ log = logging.getLogger("lite3")
 lite3_quadruped = Primitive(id="lite3_quadruped", namespace="robonix/primitive/chassis")
 
 cmd_vel_pub = None
+_odom_yaw: float | None = None
+_odom_stamp = 0.0
+_odom_cv = threading.Condition()
+_motion_lock = threading.Lock()
 
 _pkg_root: Path = Path(__file__).resolve().parent.parent
 _transfer_proc: subprocess.Popen | None = None
@@ -163,7 +167,12 @@ def _stop_heartbeat() -> None:
 
 @lite3_quadruped.grpc(
     "robonix/primitive/chassis/move",
-    description="Drive Lite3 quadruped using ROS2 Twist commands.",
+    description=(
+        "Move or rotate the Lite3 base. Use forward_m for signed forward/backward "
+        "distance, rotate_deg for signed in-place yaw rotation (positive is "
+        "counter-clockwise/left, negative is clockwise/right), or angular_z with "
+        "duration_sec for raw yaw velocity. The robot must already be standing."
+    ),
 )
 def move(req: "chassis_pb2.ExecuteMoveCommand_Request") -> "chassis_pb2.ExecuteMoveCommand_Response":
     global cmd_vel_pub
@@ -179,38 +188,44 @@ def move(req: "chassis_pb2.ExecuteMoveCommand_Request") -> "chassis_pb2.ExecuteM
 
     from geometry_msgs.msg import Twist  # type: ignore
 
-    tw = Twist()
-    if float(getattr(msg, "forward_m", 0.0)) != 0.0:
-        forward_m = float(msg.forward_m)
-        sign = 1.0 if forward_m > 0 else -1.0
-        tw.linear.x = sign * speed_mps
-        duration = abs(forward_m) / speed_mps
-        mode = "forward_m"
-    elif float(getattr(msg, "rotate_deg", 0.0)) != 0.0:
-        rotate_deg = float(msg.rotate_deg)
-        rad = math.radians(rotate_deg)
-        sign = 1.0 if rad > 0 else -1.0
-        tw.angular.z = sign * ang_speed_rps
-        duration = abs(rad) / ang_speed_rps
-        mode = "rotate_deg"
-    else:
-        tw.linear.x = float(getattr(msg, "linear_x", 0.0))
-        tw.linear.y = float(getattr(msg, "linear_y", 0.0))
-        tw.linear.z = float(getattr(msg, "linear_z", 0.0))
-        tw.angular.x = float(getattr(msg, "angular_x", 0.0))
-        tw.angular.y = float(getattr(msg, "angular_y", 0.0))
-        tw.angular.z = float(getattr(msg, "angular_z", 0.0))
-        duration = float(getattr(msg, "duration_sec", 0.0))
-        if duration <= 0.0:
-            duration = default_dur
-        mode = "velocity"
-
-    stop = Twist()
-    steps = max(1, int(duration / 0.1))
-    for _ in range(steps):
-        cmd_vel_pub.publish(tw)
-        time.sleep(0.1)
-    cmd_vel_pub.publish(stop)
+    with _motion_lock:
+        tw = Twist()
+        actual_rotate_deg = 0.0
+        if float(getattr(msg, "forward_m", 0.0)) != 0.0:
+            forward_m = float(msg.forward_m)
+            sign = 1.0 if forward_m > 0 else -1.0
+            tw.linear.x = sign * speed_mps
+            duration = abs(forward_m) / speed_mps
+            mode = "forward_m"
+            _publish_for_duration(tw, duration)
+        elif float(getattr(msg, "rotate_deg", 0.0)) != 0.0:
+            rotate_deg = float(msg.rotate_deg)
+            ok, actual_rotate_deg, duration, error = _rotate_closed_loop(
+                rotate_deg, ang_speed_rps,
+            )
+            if not ok:
+                return chassis_pb2.ExecuteMoveCommand_Response(
+                    status=std_msgs_pb2.String(data=json.dumps({
+                        "status": "error",
+                        "mode": "rotate_deg",
+                        "error": error,
+                        "requested_rotate_deg": rotate_deg,
+                        "actual_rotate_deg": actual_rotate_deg,
+                    })),
+                )
+            mode = "rotate_deg"
+        else:
+            tw.linear.x = float(getattr(msg, "linear_x", 0.0))
+            tw.linear.y = float(getattr(msg, "linear_y", 0.0))
+            tw.linear.z = float(getattr(msg, "linear_z", 0.0))
+            tw.angular.x = float(getattr(msg, "angular_x", 0.0))
+            tw.angular.y = float(getattr(msg, "angular_y", 0.0))
+            tw.angular.z = float(getattr(msg, "angular_z", 0.0))
+            duration = float(getattr(msg, "duration_sec", 0.0))
+            if duration <= 0.0:
+                duration = default_dur
+            mode = "velocity"
+            _publish_for_duration(tw, duration)
 
     return chassis_pb2.ExecuteMoveCommand_Response(
         status=std_msgs_pb2.String(data=json.dumps({
@@ -219,8 +234,76 @@ def move(req: "chassis_pb2.ExecuteMoveCommand_Request") -> "chassis_pb2.ExecuteM
             "duration_sec": duration,
             "linear_x": tw.linear.x,
             "angular_z": tw.angular.z,
+            "actual_rotate_deg": actual_rotate_deg,
         })),
     )
+
+
+def _publish_for_duration(twist, duration: float) -> None:
+    """Publish a velocity at 10 Hz and always finish with a stop command."""
+    from geometry_msgs.msg import Twist  # type: ignore
+
+    try:
+        deadline = time.monotonic() + max(0.1, duration)
+        while time.monotonic() < deadline:
+            cmd_vel_pub.publish(twist)
+            time.sleep(0.1)
+    finally:
+        cmd_vel_pub.publish(Twist())
+
+
+def _wrap_angle(rad: float) -> float:
+    return math.atan2(math.sin(rad), math.cos(rad))
+
+
+def _on_odom(msg) -> None:
+    """Track the latest odometry yaw for closed-loop angle commands."""
+    global _odom_yaw, _odom_stamp
+    q = msg.pose.pose.orientation
+    siny_cosp = 2.0 * (q.w * q.z + q.x * q.y)
+    cosy_cosp = 1.0 - 2.0 * (q.y * q.y + q.z * q.z)
+    with _odom_cv:
+        _odom_yaw = math.atan2(siny_cosp, cosy_cosp)
+        _odom_stamp = time.monotonic()
+        _odom_cv.notify_all()
+
+
+def _rotate_closed_loop(target_deg: float, max_speed: float):
+    """Rotate using accumulated odometry yaw, handling wrap at +/-pi."""
+    from geometry_msgs.msg import Twist  # type: ignore
+
+    target = math.radians(target_deg)
+    tolerance = math.radians(float(os.environ.get(
+        "LITE3_ROTATE_TOLERANCE_DEG", "3.0")))
+    timeout = max(5.0, abs(target) / max(0.1, max_speed) * 2.5 + 2.0)
+    started = time.monotonic()
+    with _odom_cv:
+        if _odom_yaw is None or started - _odom_stamp > 1.0:
+            _odom_cv.wait(timeout=1.0)
+        if _odom_yaw is None or time.monotonic() - _odom_stamp > 1.0:
+            return False, 0.0, 0.0, "fresh odometry unavailable"
+        previous = _odom_yaw
+
+    accumulated = 0.0
+    command = Twist()
+    try:
+        while time.monotonic() - started < timeout:
+            with _odom_cv:
+                _odom_cv.wait(timeout=0.1)
+                if _odom_yaw is None or time.monotonic() - _odom_stamp > 1.0:
+                    return False, math.degrees(accumulated), time.monotonic() - started, "odometry became stale"
+                current = _odom_yaw
+            accumulated += _wrap_angle(current - previous)
+            previous = current
+            remaining = target - accumulated
+            if abs(remaining) <= tolerance:
+                return True, math.degrees(accumulated), time.monotonic() - started, ""
+            speed = min(max_speed, max(0.15, abs(remaining) * 1.2))
+            command.angular.z = math.copysign(speed, remaining)
+            cmd_vel_pub.publish(command)
+        return False, math.degrees(accumulated), time.monotonic() - started, "rotation timeout"
+    finally:
+        cmd_vel_pub.publish(Twist())
 
 
 def send_cmd(name: str):
@@ -253,7 +336,7 @@ def init(cfg):
     """INACTIVE: spawn transfer ROS2 nodes, create publisher, wait for odom."""
     global cmd_vel_pub
 
-    odom_topic = cfg.get("odom_topic") or os.environ.get("LITE3_ODOM_TOPIC", "/leg_odom2")
+    odom_topic = cfg.get("odom_topic") or os.environ.get("LITE3_ODOM_TOPIC", "/odom")
     twist_in_topic = cfg.get("twist_in_topic") or os.environ.get("LITE3_CMD_VEL_TOPIC", "/cmd_vel")
 
     # 1. Spawn transfer ROS2 nodes (jetson2motion, jetson2app, sensor_checker)
@@ -278,6 +361,16 @@ def init(cfg):
         "robonix/primitive/chassis/twist_in",
         twist_in_topic,
         qos="reliable",
+    )
+
+    from nav_msgs.msg import Odometry  # type: ignore
+    lite3_quadruped.create_subscription(
+        "robonix/primitive/chassis/odom",
+        topic=odom_topic,
+        msg_type=Odometry,
+        callback=_on_odom,
+        qos="best_effort",
+        declare=False,
     )
     lite3_quadruped.declare_ros2_topic(
         "robonix/primitive/chassis/odom",

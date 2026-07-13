@@ -21,6 +21,7 @@ Thumbs.db
 
 # ROS
 log/
+logs/
 *.bag
 devel/
 install/

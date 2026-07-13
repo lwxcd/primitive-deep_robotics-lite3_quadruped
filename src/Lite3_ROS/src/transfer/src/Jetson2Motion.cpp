@@ -57,7 +57,7 @@ public:
         }
 
         leg_odom_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("leg_odom", 10);    
-        leg_odom_pub2_ = create_publisher<nav_msgs::msg::Odometry>("leg_odom2", 10);
+        odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/odom", 10);
         joint_state_pub_ = create_publisher<sensor_msgs::msg::JointState>("joint_states", 10);
         // imu_pub_100_ = create_publisher<sensor_msgs::msg::Imu>("/imu/data", 10);
         imu_pub_200_ = create_publisher<sensor_msgs::msg::Imu>("/imu/data", 10);        
@@ -142,13 +142,24 @@ public:
             leg_odom_data.pose.pose.position.z = robot_state->pos_world[2];
             leg_odom_pub_->publish(leg_odom_data);
 
-            nav_msgs::msg::Odometry leg_odom_data2;     
-            leg_odom_data2.header.stamp = this->now();
+            nav_msgs::msg::Odometry leg_odom_data2;
+            leg_odom_data2.header.stamp = leg_odom_data.header.stamp;
+            leg_odom_data2.header.frame_id = "odom";
+            leg_odom_data2.child_frame_id = "base_link";
             leg_odom_data2.pose = leg_odom_data.pose;
+            // Planar odometry covariance. Keep z/roll/pitch deliberately
+            // uncertain so navigation does not treat them as measurements.
+            leg_odom_data2.pose.covariance[0] = 0.02;
+            leg_odom_data2.pose.covariance[7] = 0.02;
+            leg_odom_data2.pose.covariance[14] = 99999.0;
+            leg_odom_data2.pose.covariance[21] = 99999.0;
+            leg_odom_data2.pose.covariance[28] = 99999.0;
+            leg_odom_data2.pose.covariance[35] = 0.05;
             leg_odom_data2.twist.twist.linear.x = robot_state->vel_body[0];
             leg_odom_data2.twist.twist.linear.y = robot_state->vel_body[1];
             leg_odom_data2.twist.twist.angular.z = robot_state->rpy_vel[2];
-            leg_odom_pub2_->publish(leg_odom_data2);
+            leg_odom_data2.twist.covariance = leg_odom_data2.pose.covariance;
+            odom_pub_->publish(leg_odom_data2);
             
             sensor_msgs::msg::Imu imu_msg;
             imu_msg.header.stamp = this->now();
@@ -163,32 +174,17 @@ public:
             imu_msg.linear_acceleration.z = robot_state->xyz_acc[2];
             // imu_pub_100_->publish(imu_msg);
 
-            geometry_msgs::msg::TransformStamped t;
-            t.header.stamp = this->now();
-            t.header.frame_id = "robot_foot_print";
-            t.child_frame_id = "base_link";
-            t.transform.translation.x = 0.0;
-            t.transform.translation.y = 0.0;
-            t.transform.translation.z = 0.34751;
-            q.setRPY(robot_state->rpy[0]/180*PI, robot_state->rpy[1]/180*PI, 0.0);
-            t.transform.rotation.x = q.x();
-            t.transform.rotation.y = q.y();
-            t.transform.rotation.z = q.z();
-            t.transform.rotation.w = q.w();
-            tf_broadcaster_->sendTransform(t);
-
             std_msgs::msg::Float64 ultrasound_distance;
             ultrasound_distance.data = robot_state->ultrasound[1];
             ultrasound_pub_->publish(ultrasound_distance);
             
             geometry_msgs::msg::TransformStamped leg_odom_trans;       
-            leg_odom_trans.header.stamp = this->now();
-            leg_odom_trans.header.frame_id = "odom";
-            leg_odom_trans.child_frame_id = "base_link";
-            leg_odom_trans.transform.translation.x = leg_odom_data.pose.pose.position.x;
-            leg_odom_trans.transform.translation.y = leg_odom_data.pose.pose.position.y;
-            leg_odom_trans.transform.translation.z = leg_odom_data.pose.pose.position.z;
-            leg_odom_trans.transform.rotation = imu_msg.orientation;
+            leg_odom_trans.header = leg_odom_data2.header;
+            leg_odom_trans.child_frame_id = leg_odom_data2.child_frame_id;
+            leg_odom_trans.transform.translation.x = leg_odom_data2.pose.pose.position.x;
+            leg_odom_trans.transform.translation.y = leg_odom_data2.pose.pose.position.y;
+            leg_odom_trans.transform.translation.z = leg_odom_data2.pose.pose.position.z;
+            leg_odom_trans.transform.rotation = leg_odom_data2.pose.pose.orientation;
             tf_broadcaster_->sendTransform(leg_odom_trans);
         }
     }
@@ -306,7 +302,7 @@ private:
     std::thread recv_thread_;
 
     rclcpp::Publisher<geometry_msgs::msg::PoseWithCovarianceStamped>::SharedPtr leg_odom_pub_;
-    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr leg_odom_pub2_;
+    rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr odom_pub_;
     rclcpp::Publisher<sensor_msgs::msg::JointState>::SharedPtr joint_state_pub_;
     rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_100_;
     rclcpp::Publisher<sensor_msgs::msg::Imu>::SharedPtr imu_pub_200_;    

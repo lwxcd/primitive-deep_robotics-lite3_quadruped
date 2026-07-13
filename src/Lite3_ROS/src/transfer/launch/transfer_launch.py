@@ -1,13 +1,14 @@
 
 from launch import LaunchDescription
 from launch_ros.actions import Node
+import os
 
 def generate_launch_description():
     jetson2app = Node(
         package="transfer",
         executable="jetson2app",
         parameters=[
-            {'local_port': 43899}
+            {'local_port': int(os.environ.get('TRANSFER_APP_PORT', '43899'))}
         ],
         output='screen'
     )
@@ -15,9 +16,9 @@ def generate_launch_description():
         package="transfer",
         executable="jetson2motion",
         parameters=[
-            {'target_ip': "192.168.1.120"},
-            {'target_port': 43893},
-            {'local_port': 43897}
+            {'target_ip': os.environ.get('TRANSFER_TARGET_IP', '192.168.1.120')},
+            {'target_port': int(os.environ.get('TRANSFER_TARGET_PORT', '43893'))},
+            {'local_port': int(os.environ.get('TRANSFER_LOCAL_PORT', '43897'))}
         ],
         output='screen'
     )
