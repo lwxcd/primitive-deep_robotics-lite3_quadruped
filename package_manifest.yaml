@@ -1,11 +1,14 @@
 manifestVersion: 1
 
 package:
-  name: com.robonix.lite3.quadruped
+  name: robonix.primitive.deep_robotics.lite3.quadruped
   version: 0.1.0
   vendor: robonix
   description: Lite3 quadruped ROS primitive driver wrapper
   license: Apache-2.0
+  tags: [primitive, chassis, deep_robotics, lite3, quadruped, ros2]
+  maintainers:
+    - Bunnycxk <2501213313@stu.pku.edu.cn>
 
 # cap_id is what shows up in `rbnx caps`. Convention: short name, same
 # across the three places it appears (atlas, package, manifest).
