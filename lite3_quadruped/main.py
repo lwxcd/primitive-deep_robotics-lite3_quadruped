@@ -17,6 +17,7 @@ Config (from manifest's ``config:`` block, delivered via Driver(CMD_INIT)):
     target_port      default 43893
     local_port       default 43897
     app_port         default 43899
+    publish_odom_tf  default true (publish chassis odom -> base_link TF)
 """
 from __future__ import annotations
 
@@ -89,12 +90,17 @@ def _spawn_transfer(cfg: dict) -> None:
     env["TRANSFER_TARGET_PORT"] = str(cfg.get("target_port", "43893"))
     env["TRANSFER_LOCAL_PORT"] = str(cfg.get("local_port", "43897"))
     env["TRANSFER_APP_PORT"] = str(cfg.get("app_port", "43899"))
+    env["TRANSFER_ODOM_TOPIC"] = str(cfg.get("odom_topic", "/odom"))
+    env["TRANSFER_PUBLISH_ODOM_TF"] = (
+        "true" if bool(cfg.get("publish_odom_tf", True)) else "false"
+    )
 
     log_path = _pkg_root / "rbnx-build" / "data" / "transfer.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log_fh = open(log_path, "ab", buffering=0)
-    log.info("spawning transfer: target_ip=%s target_port=%s → %s",
-             env["TRANSFER_TARGET_IP"], env["TRANSFER_TARGET_PORT"], log_path)
+    log.info("spawning transfer: target_ip=%s target_port=%s odom_topic=%s publish_odom_tf=%s → %s",
+             env["TRANSFER_TARGET_IP"], env["TRANSFER_TARGET_PORT"],
+             env["TRANSFER_ODOM_TOPIC"], env["TRANSFER_PUBLISH_ODOM_TF"], log_path)
     _transfer_proc = subprocess.Popen(
         ["ros2", "launch", "transfer", "transfer_launch.py"],
         env=env,

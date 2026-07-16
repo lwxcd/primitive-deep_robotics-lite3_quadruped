@@ -41,6 +41,11 @@ public:
         declare_parameter("local_port", 43897);
         get_parameter("local_port", local_port);
         RCLCPP_INFO(get_logger(),"local_port:  %d ",local_port);
+        publish_odom_tf_ = declare_parameter<bool>("publish_odom_tf", true);
+        odom_topic_ = declare_parameter<std::string>("odom_topic", "/odom");
+        RCLCPP_INFO(get_logger(), "publish_odom_tf: %s",
+                    publish_odom_tf_ ? "true" : "false");
+        RCLCPP_INFO(get_logger(), "odom_topic: %s", odom_topic_.c_str());
 
         socket_fd_ = socket(AF_INET, SOCK_DGRAM, 0);
         if(socket_fd_ < 0){
@@ -57,7 +62,7 @@ public:
         }
 
         leg_odom_pub_ = create_publisher<geometry_msgs::msg::PoseWithCovarianceStamped>("leg_odom", 10);    
-        odom_pub_ = create_publisher<nav_msgs::msg::Odometry>("/odom", 10);
+        odom_pub_ = create_publisher<nav_msgs::msg::Odometry>(odom_topic_, 10);
         joint_state_pub_ = create_publisher<sensor_msgs::msg::JointState>("joint_states", 10);
         // imu_pub_100_ = create_publisher<sensor_msgs::msg::Imu>("/imu/data", 10);
         imu_pub_200_ = create_publisher<sensor_msgs::msg::Imu>("/imu/data", 10);        
@@ -185,7 +190,9 @@ public:
             leg_odom_trans.transform.translation.y = leg_odom_data2.pose.pose.position.y;
             leg_odom_trans.transform.translation.z = leg_odom_data2.pose.pose.position.z;
             leg_odom_trans.transform.rotation = leg_odom_data2.pose.pose.orientation;
-            tf_broadcaster_->sendTransform(leg_odom_trans);
+            if (publish_odom_tf_) {
+                tf_broadcaster_->sendTransform(leg_odom_trans);
+            }
         }
     }
 
@@ -309,6 +316,8 @@ private:
     rclcpp::Publisher<geometry_msgs::msg::Twist>::SharedPtr handle_pub_;
     rclcpp::Publisher<std_msgs::msg::Float64>::SharedPtr ultrasound_pub_;
     std::unique_ptr<tf2_ros::TransformBroadcaster> tf_broadcaster_;
+    bool publish_odom_tf_{true};
+    std::string odom_topic_{"/odom"};
 };
 
 class MotionSender : public rclcpp::Node{
