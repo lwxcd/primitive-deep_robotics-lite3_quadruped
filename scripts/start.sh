@@ -3,7 +3,7 @@
 # lite3_quadruped runtime — start the ROS-aware primitive provider.
 set -euo pipefail
 
-PKG="$(cd "$(dirname "$0")/.." && pwd)"
+PKG="${RBNX_PACKAGE_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 # ROS setup.bash may reference unset variables; disable nounset temporarily.
 set +u
 if [ -f "/opt/ros/humble/setup.bash" ]; then
@@ -19,7 +19,6 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-export PYTHONPATH="$PKG:$PYTHONPATH"
-export PYTHONPATH="/home/jetson/cxk/robonix/pylib/robonix-api:$PYTHONPATH"
+export PYTHONPATH="$(rbnx path robonix-api):$PKG:${PYTHONPATH:-}"
 
 exec python3 -m lite3_quadruped.main

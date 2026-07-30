@@ -61,7 +61,9 @@ _odom_stamp = 0.0
 _odom_cv = threading.Condition()
 _motion_lock = threading.Lock()
 
-_pkg_root: Path = Path(__file__).resolve().parent.parent
+_pkg_root = Path(
+    os.environ.get("RBNX_PACKAGE_ROOT", Path(__file__).resolve().parent.parent)
+).resolve()
 _transfer_proc: subprocess.Popen | None = None
 
 import chassis_pb2  # noqa: E402
@@ -97,6 +99,7 @@ def _spawn_transfer(cfg: dict) -> None:
 
     log_path = _pkg_root / "rbnx-build" / "data" / "transfer.log"
     log_path.parent.mkdir(parents=True, exist_ok=True)
+    env["TRANSFER_APP_LOG_PATH"] = str(log_path.with_name("nx2app.log"))
     log_fh = open(log_path, "ab", buffering=0)
     log.info("spawning transfer: target_ip=%s target_port=%s odom_topic=%s publish_odom_tf=%s → %s",
              env["TRANSFER_TARGET_IP"], env["TRANSFER_TARGET_PORT"],

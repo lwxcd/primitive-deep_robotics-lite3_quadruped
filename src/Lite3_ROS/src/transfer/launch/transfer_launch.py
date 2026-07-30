@@ -8,7 +8,8 @@ def generate_launch_description():
         package="transfer",
         executable="jetson2app",
         parameters=[
-            {'local_port': int(os.environ.get('TRANSFER_APP_PORT', '43899'))}
+            {'local_port': int(os.environ.get('TRANSFER_APP_PORT', '43899'))},
+            {'log_path': os.environ.get('TRANSFER_APP_LOG_PATH', '')}
         ],
         output='screen'
     )

@@ -53,6 +53,7 @@ public:
         int local_port;
         declare_parameter("local_port", 43899);
         get_parameter("local_port", local_port);
+        const auto log_path = declare_parameter<std::string>("log_path", "");
 
         sensors_logger_ = std::make_unique<SensorsLogger>
             (std::shared_ptr<rclcpp::Node>(this));
@@ -65,8 +66,16 @@ public:
         listen_addr_.sin_addr.s_addr = htonl(INADDR_ANY);
         bind(socket_fd_, (struct sockaddr *)&listen_addr_, sizeof(listen_addr_));
 
-        logfile_.open("/home/ysc/lite_cog_ros2/transfer/nx2app_log.txt");
-        logfile_ << "start logging" << endl;
+        if (!log_path.empty()) {
+            logfile_.open(log_path);
+            if (logfile_) {
+                logfile_ << "start logging" << endl;
+            } else {
+                RCLCPP_WARN(
+                    get_logger(), "Unable to open app log file: %s",
+                    log_path.c_str());
+            }
+        }
 
         joy_pub_ = create_publisher<sensor_msgs::msg::Joy>("commands/joy_raw", 1);    
 
