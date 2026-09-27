@@ -1,7 +1,7 @@
 # lite3_quadruped — Lite3 quadruped chassis primitive
 
-Wraps the Lite3 quadruped robot motion host and exposes posture control
-and burst-style movement to pilot via two MCP tools. Use this capability
+Wraps either the Lite3 motion host or the MuJoCo ROS 2 Bridge and exposes
+the same posture and burst-style movement tools to pilot. Use this capability
 whenever the user asks the robot to stand, sit, initialize, or move
 (forward/backward/rotate).
 
@@ -16,19 +16,21 @@ transition between postures; there is no automatic posture change on move.
 |-------|------|---------|
 | `posture_name` | string | one of `"stand"`, `"sit"`, `"remote"` |
 
-Returns `{success, message}`. `success=true` means the UDP command was
-dispatched to the motion host.
+Returns `{success, message}`. `success=true` means the selected backend
+accepted the posture request.
 
 **Available posture names:**
 
-| posture_name | UDP command | description |
-|-------------|-------------|-------------|
-| `"stand"` | `0x21010202` | standing posture, ready for movement |
-| `"sit"` | `0x21010202` | sitting posture (**same UDP command as stand**) |
-| `"remote"` | `0x21010C02` | enter remote-control mode |
+| posture_name | hardware | simulation |
+|-------------|----------|------------|
+| `"stand"` | UDP `0x21010202` | `/lite3_sim/stand` |
+| `"sit"` | UDP `0x21010202` | `/lite3_sim/lie_down` |
+| `"zero"` / `"reset"` | zero where supported | `/lite3_sim/reset` |
+| `"remote"` | UDP `0x21010C02` | unsupported |
+| `"emergency_stop"` | unsupported | `/lite3_sim/emergency_stop` |
 
-> **IMPORTANT:** `"stand"` and `"sit"` use the **same underlying UDP
-> command** (`0x21010202`). The pilot **must track the robot's current
+> **Hardware:** `"stand"` and `"sit"` use the same underlying UDP command
+> (`0x21010202`). The pilot **must track the robot's current
 > posture as state** to avoid redundant calls. If the robot is already
 > standing, calling `"stand"` again is a no-op (do not send it).
 
@@ -53,7 +55,7 @@ then stop. **Not a continuous stream** — each call is a discrete burst.
 
 1. If `forward_m ≠ 0`: moves at `speed_mps` (default 0.2 m/s) for the
    calculated duration. Duration = `abs(forward_m) / speed_mps`.
-2. Else if `rotate_deg ≠ 0`: rotates in place using `/leg_odom2` yaw as
+2. Else if `rotate_deg ≠ 0`: rotates in place using the configured odometry yaw as
    closed-loop feedback. It slows near the target, stops within the configured
    tolerance, and reports the measured angle or an odometry/timeout error.
 3. Else: raw velocity mode using `linear_x/y/z`, `angular_x/y/z` for
@@ -77,10 +79,14 @@ serialized as JSON in the `status` field.
 
 ## Required initialization
 
-`rbnx boot` automatically runs the init → zero sequence during
-primitive startup (in `on_init`).  No manual posture commands are
+In hardware mode, `rbnx boot` automatically starts transfer and heartbeat,
+then runs the motion-host initialization during `on_init`. No manual commands are
 needed before moving — just call `set_posture("stand")` and the
 robot is ready.
+
+Simulation mode never starts transfer, a heartbeat, or an initialization UDP
+sequence. It waits for active `/clock`, `/odom`, and `/joint_states` messages
+from the external MuJoCo Bridge.
 
 ```
 stand → (ready for move)
@@ -111,12 +117,12 @@ stand → (ready for move)
   re-issue `stand()` before the next `move()`.
 - If the user says "sit down", call `set_posture("sit")` and update the
   tracked state. If the user then says "stand up", call
-  `set_posture("stand")` (it's the same underlying command, but the pilot
-  should issue it to follow the user's intent).
+  `set_posture("stand")`. Hardware uses the same underlying UDP command for
+  both; simulation uses distinct stand and lie-down services.
 
 ## Recommended pilot workflow
 
-1. On first use after boot: `stand` (init + zero already done by `on_init`).
+1. On first use after boot: `stand` (motion-host initialization is already done by `on_init`).
 2. When the user says "go forward 1 meter": call `move(forward_m=1.0)`.
 3. When the user says "turn left 90 degrees": call `move(rotate_deg=90)`.
 4. When the user says "sit": call `set_posture("sit")` and mark state as
@@ -131,10 +137,10 @@ stand → (ready for move)
   posture state is sitting (or unknown), call `set_posture("stand")` first.
   Do not call `move()` while the robot is sitting.
 - Never issue `move()` before `stand` is complete.
-- The robot sends a UDP heartbeat every 200 ms (`0x21040001`) in the
-  background — this is managed automatically by the primitive after init.
-- The transfer ROS2 nodes (`jetson2motion`, `jetson2app`, `sensor_checker`)
-  must be healthy. If `/leg_odom2` is not available, the primitive enters
+- In hardware mode, the robot receives a UDP heartbeat every 200 ms
+  (`0x21040001`) after init.
+- In hardware mode, transfer ROS2 nodes (`jetson2motion`, `jetson2app`, `sensor_checker`)
+  must be healthy. If the configured odometry topic is not available, the primitive enters
   `Deferred` state.
 - `cmd_vel` publisher is created after init. If `move()` is called before
   init completes, it returns `{error: "ROS2 not initialized"}`.
@@ -147,15 +153,16 @@ stand → (ready for move)
   burst.
 - It does not do obstacle avoidance or path planning. Use
   `nav2_wrapper_rbnx` for goal-based navigation.
-- It does not provide odometry fusion — `/leg_odom2` is produced by the
+- It does not provide odometry fusion — the configured odometry topic is produced by the
   transfer nodes.
 - It does not provide IMU or joint state directly — those are published
   on ROS2 topics by the transfer nodes.
 
 ## Lifecycle
 
-The primitive is managed by `rbnx boot`. `on_init` spawns the transfer
-ROS2 nodes, creates the `cmd_vel` publisher, waits for `/leg_odom2`,
-starts the UDP heartbeat, then automatically sends `init` → `zero` UDP
-commands to unlock and calibrate the robot. `on_shutdown` stops the
-heartbeat and kills the transfer subprocess.
+The primitive is managed by `rbnx boot`. `on_init` prints the selected backend,
+starts only that backend, registers the shared `cmd_vel`/odom contracts, and
+waits for its required topics. Hardware mode owns transfer and heartbeat.
+Simulation mode connects to the external Bridge and rejects all physical target
+IP/port settings. `on_shutdown` publishes a final zero Twist and stops only the
+selected backend.
