@@ -2,9 +2,9 @@ manifestVersion: 1
 
 package:
   name: robonix.primitive.deep_robotics.lite3.quadruped
-  version: 0.1.0
+  version: 0.2.0
   vendor: robonix
-  description: Lite3 quadruped ROS primitive driver wrapper
+  description: Lite3 quadruped primitive with hardware and MuJoCo backends
   license: Apache-2.0
   tags: [primitive, chassis, deep_robotics, lite3, quadruped, ros2]
   maintainers:

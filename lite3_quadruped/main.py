@@ -1,51 +1,20 @@
 #!/usr/bin/env python3
 # SPDX-License-Identifier: Apache-2.0
-"""lite3_quadruped — Lite3 quadruped chassis primitive.
-
-Owns ``robonix/primitive/chassis/*``.
-
-Lifecycle:
-    on_init     — spawn transfer ROS2 nodes (jetson2motion, jetson2app,
-                  sensor_checker) → create cmd_vel publisher → wait for
-                  /leg_odom2 → declare twist_in/odom contracts.
-    on_shutdown — kill transfer subprocess.
-
-Config (from manifest's ``config:`` block, delivered via Driver(CMD_INIT)):
-    odom_topic       default "/leg_odom2"        (env LITE3_ODOM_TOPIC)
-    twist_in_topic   default "/cmd_vel"           (env LITE3_CMD_VEL_TOPIC)
-    target_ip        default "192.168.1.120"      motion host UDP address
-    target_port      default 43893
-    local_port       default 43897
-    app_port         default 43899
-    publish_odom_tf  default true (publish chassis odom -> base_link TF)
-"""
+"""Lite3 chassis primitive with hardware and MuJoCo simulation backends."""
 from __future__ import annotations
 
 import json
 import logging
 import math
 import os
-import signal
-import subprocess
 import threading
 import time
 from pathlib import Path
 
-import socket
-import struct
-
 from robonix_api import Primitive, Ok, Err, Deferred
 
-ROBOT_IP = "192.168.1.120"
-ROBOT_PORT = 43893
-
-cmd_dict = {
-    "stand": [0x21010202, 0, 0],
-    "sit": [0x21010202, 0, 0],
-    "zero": [0x21010C05, 0, 0],
-    "init": [0x21010C03, 0, 0],
-    "remote": [0x21010C02, 0, 1],
-}
+from .backends import Backend, create_backend
+from .config import ConfigError, parse_config
 
 logging.basicConfig(
     level=os.environ.get("LITE3_LOG_LEVEL", "INFO"),
@@ -64,114 +33,11 @@ _motion_lock = threading.Lock()
 _pkg_root = Path(
     os.environ.get("RBNX_PACKAGE_ROOT", Path(__file__).resolve().parent.parent)
 ).resolve()
-_transfer_proc: subprocess.Popen | None = None
+_backend: Backend | None = None
 
 import chassis_pb2  # noqa: E402
 import std_msgs_pb2  # noqa: E402
 from quadruped_mcp import SetPosture_Request, SetPosture_Response  # noqa: E402
-
-# ── heartbeat state ───────────────────────────────────────────────────────
-_hb_thread: "threading.Thread | None" = None
-_hb_running = False
-HEARTBEAT_INTERVAL = 0.2
-HEARTBEAT_CMD = [0x21040001, 0, 0]
-
-
-# ── transfer ROS2 subprocess management ───────────────────────────────────
-def _spawn_transfer(cfg: dict) -> None:
-    """Spawn transfer ROS2 nodes (jetson2motion, jetson2app, sensor_checker).
-
-    The transfer package bridges UDP ↔ ROS2 for Lite3 motion host
-    communication. See ``src/Lite3_ROS/src/transfer/launch/``.
-    """
-    global _transfer_proc
-    env = dict(os.environ)
-    # Pass cfg as env vars for the subprocess (launch file reads ROS params;
-    # env vars are available for future extensibility).
-    env["TRANSFER_TARGET_IP"] = str(cfg.get("target_ip", "192.168.1.120"))
-    env["TRANSFER_TARGET_PORT"] = str(cfg.get("target_port", "43893"))
-    env["TRANSFER_LOCAL_PORT"] = str(cfg.get("local_port", "43897"))
-    env["TRANSFER_APP_PORT"] = str(cfg.get("app_port", "43899"))
-    env["TRANSFER_ODOM_TOPIC"] = str(cfg.get("odom_topic", "/odom"))
-    env["TRANSFER_PUBLISH_ODOM_TF"] = (
-        "true" if bool(cfg.get("publish_odom_tf", True)) else "false"
-    )
-
-    log_path = _pkg_root / "rbnx-build" / "data" / "transfer.log"
-    log_path.parent.mkdir(parents=True, exist_ok=True)
-    env["TRANSFER_APP_LOG_PATH"] = str(log_path.with_name("nx2app.log"))
-    log_fh = open(log_path, "ab", buffering=0)
-    log.info("spawning transfer: target_ip=%s target_port=%s odom_topic=%s publish_odom_tf=%s → %s",
-             env["TRANSFER_TARGET_IP"], env["TRANSFER_TARGET_PORT"],
-             env["TRANSFER_ODOM_TOPIC"], env["TRANSFER_PUBLISH_ODOM_TF"], log_path)
-    _transfer_proc = subprocess.Popen(
-        ["ros2", "launch", "transfer", "transfer_launch.py"],
-        env=env,
-        stdout=log_fh, stderr=log_fh,
-        start_new_session=True,
-    )
-
-
-def _kill_transfer() -> None:
-    """Kill the transfer subprocess group (SIGTERM → SIGKILL fallback)."""
-    p = _transfer_proc
-    if p is None or p.poll() is not None:
-        return
-    try:
-        os.killpg(os.getpgid(p.pid), signal.SIGTERM)
-    except ProcessLookupError:
-        return
-    try:
-        p.wait(timeout=5.0)
-    except subprocess.TimeoutExpired:
-        try:
-            os.killpg(os.getpgid(p.pid), signal.SIGKILL)
-        except ProcessLookupError:
-            pass
-
-
-# ── UDP heartbeat ─────────────────────────────────────────────────────────
-def _send_udp(cmd1: int, cmd2: int, cmd3: int) -> None:
-    """Send a single 3-uint32_t UDP packet to the robot."""
-    payload = struct.pack("<III", cmd1, cmd2, cmd3)
-    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    sock.sendto(payload, (ROBOT_IP, ROBOT_PORT))
-    sock.close()
-
-
-def _heartbeat_loop() -> None:
-    """Background thread: send heartbeat every HEARTBEAT_INTERVAL seconds."""
-    global _hb_running
-    seq = 0
-    while _hb_running:
-        try:
-            _send_udp(*HEARTBEAT_CMD)
-            seq += 1
-            log.debug("heartbeat #%d sent", seq)
-        except Exception as e:
-            log.warning("heartbeat error: %s", e)
-        time.sleep(HEARTBEAT_INTERVAL)
-
-
-def _start_heartbeat() -> None:
-    """Launch the heartbeat background thread."""
-    global _hb_thread, _hb_running
-    if _hb_running:
-        return
-    _hb_running = True
-    _hb_thread = threading.Thread(target=_heartbeat_loop, daemon=True)
-    _hb_thread.start()
-    log.info("heartbeat started (interval=%.1fs)", HEARTBEAT_INTERVAL)
-
-
-def _stop_heartbeat() -> None:
-    """Stop the heartbeat background thread."""
-    global _hb_running, _hb_thread
-    _hb_running = False
-    if _hb_thread is not None:
-        _hb_thread.join(timeout=1.0)
-        _hb_thread = None
-    log.info("heartbeat stopped")
 
 
 @lite3_quadruped.grpc(
@@ -315,100 +181,106 @@ def _rotate_closed_loop(target_deg: float, max_speed: float):
         cmd_vel_pub.publish(Twist())
 
 
-def send_cmd(name: str):
-    if name not in cmd_dict:
-        log.error("Unknown command '%s'. Valid options: %s", name, list(cmd_dict.keys()))
-        return
-    cmd1, cmd2, cmd3 = cmd_dict[name]
-    _send_udp(cmd1, cmd2, cmd3)
-    log.info("cmd '%s' sent → %s:%s", name, ROBOT_IP, ROBOT_PORT)
-
 @lite3_quadruped.mcp("robonix/primitive/chassis/posture")
 def set_posture(req: SetPosture_Request) -> SetPosture_Response:
-    """Set the Lite3 quadruped to a named posture.
-    posture_name is a string like "stand", "sit", "zero", "init", etc. 
-    you need to init be initialized before sending any commands.
-    The driver maps each name to the
-    corresponding servo-angle table and sends the joint commands."""
-    
-    send_cmd(req.posture_name)
-    time.sleep(1.0)  # crude delay to allow the posture change to take effect before accepting the next command
-
-    return SetPosture_Response(
-        success=True,
-        message=f"posture '{req.posture_name}' accepted (stub)",
-    )
+    """Route a posture request to the selected backend."""
+    if _backend is None:
+        return SetPosture_Response(
+            success=False, message="Lite3 backend is not initialized")
+    try:
+        success, message = _backend.set_posture(req.posture_name)
+    except (OSError, RuntimeError) as error:
+        success, message = False, f"posture request failed: {error}"
+    return SetPosture_Response(success=success, message=message)
 
 
 @lite3_quadruped.on_init
 def init(cfg):
-    """INACTIVE: spawn transfer ROS2 nodes, create publisher, wait for odom."""
-    global cmd_vel_pub
+    """Select a backend, register common capabilities, and check sentinels."""
+    global cmd_vel_pub, _backend
 
-    odom_topic = cfg.get("odom_topic") or os.environ.get("LITE3_ODOM_TOPIC", "/odom")
-    twist_in_topic = cfg.get("twist_in_topic") or os.environ.get("LITE3_CMD_VEL_TOPIC", "/cmd_vel")
-
-    # 1. Spawn transfer ROS2 nodes (jetson2motion, jetson2app, sensor_checker)
-    #    These bridge UDP ↔ ROS2, producing /leg_odom2, /imu/data, /joint_states
-    #    and consuming /cmd_vel.
     try:
-        _spawn_transfer(cfg)
-    except Exception as e:
-        _kill_transfer()
-        return Err(f"spawn transfer failed: {e}")
+        runtime = parse_config(cfg)
+        _backend = create_backend(runtime, _pkg_root)
+        log.info("selected backend=%s", _backend.name)
+        _backend.prepare()
+    except (ConfigError, OSError, ValueError, RuntimeError) as error:
+        if _backend is not None:
+            _backend.shutdown()
+        _backend = None
+        return Err(f"Lite3 backend initialization failed: {error}")
 
-    from geometry_msgs.msg import Twist  # type: ignore
+    try:
+        from geometry_msgs.msg import Twist  # type: ignore
+        from nav_msgs.msg import Odometry  # type: ignore
 
-    cmd_vel_pub = lite3_quadruped.create_publisher(
-        "robonix/primitive/chassis/twist_in",
-        topic=twist_in_topic,
-        msg_type=Twist,
-        qos="reliable",
-        declare=False,
-    )
-    lite3_quadruped.declare_ros2_topic(
-        "robonix/primitive/chassis/twist_in",
-        twist_in_topic,
-        qos="reliable",
-    )
+        cmd_vel_pub = lite3_quadruped.create_publisher(
+            "robonix/primitive/chassis/twist_in",
+            topic=runtime.twist_in_topic,
+            msg_type=Twist,
+            qos="reliable",
+            declare=False,
+        )
+        lite3_quadruped.declare_ros2_topic(
+            "robonix/primitive/chassis/twist_in",
+            runtime.twist_in_topic,
+            qos="reliable",
+        )
 
-    from nav_msgs.msg import Odometry  # type: ignore
-    lite3_quadruped.create_subscription(
-        "robonix/primitive/chassis/odom",
-        topic=odom_topic,
-        msg_type=Odometry,
-        callback=_on_odom,
-        qos="best_effort",
-        declare=False,
-    )
-    lite3_quadruped.declare_ros2_topic(
-        "robonix/primitive/chassis/odom",
-        odom_topic,
-        qos="reliable",
-    )
+        lite3_quadruped.create_subscription(
+            "robonix/primitive/chassis/odom",
+            topic=runtime.odom_topic,
+            msg_type=Odometry,
+            callback=_on_odom,
+            qos="best_effort",
+            declare=False,
+        )
+        lite3_quadruped.declare_ros2_topic(
+            "robonix/primitive/chassis/odom",
+            runtime.odom_topic,
+            qos="reliable",
+        )
 
-    # 2. Wait for the odometry topic that transfer should produce
-    if not lite3_quadruped.wait_for_topic(odom_topic, "nav_msgs/msg/Odometry", 15.0):
-        _kill_transfer()
-        return Deferred(f"ROS2 odom topic {odom_topic} not available")
+        for topic in _backend.required_topics():
+            if not _backend.wait_for_topic(lite3_quadruped, topic):
+                _backend.shutdown()
+                _backend = None
+                return Deferred(
+                    f"{runtime.backend} topic {topic.name} is unavailable")
+    except Exception as error:
+        _backend.shutdown()
+        _backend = None
+        cmd_vel_pub = None
+        return Err(f"failed to register Lite3 ROS interfaces: {error}")
 
-    # 3. Start UDP heartbeat to keep the robot alive
-    _start_heartbeat()
-
-    # 4. Init sequence: init → zero.  The robot requires init first to
-    #    unlock the motor controllers, then zero to calibrate joint
-    #    positions before accepting motion commands.
-    send_cmd("init")
-    time.sleep(2.0)
+    try:
+        _backend.verify_activity()
+        _backend.activate()
+    except (OSError, RuntimeError) as error:
+        _backend.shutdown()
+        _backend = None
+        return Deferred(f"{runtime.backend} backend is not ready: {error}")
 
     return Ok()
 
 
 @lite3_quadruped.on_shutdown
 def shutdown():
-    """Clean up transfer subprocess on primitive shutdown."""
-    _stop_heartbeat()
-    _kill_transfer()
+    """Stop motion and shut down only the selected backend."""
+    global cmd_vel_pub, _backend
+    if cmd_vel_pub is not None:
+        try:
+            from geometry_msgs.msg import Twist  # type: ignore
+            cmd_vel_pub.publish(Twist())
+        except Exception as error:
+            log.warning("failed to publish shutdown stop command: %s", error)
+    if _backend is not None:
+        try:
+            _backend.shutdown()
+        except Exception as error:
+            log.warning("backend shutdown failed: %s", error)
+    _backend = None
+    cmd_vel_pub = None
     return Ok()
 
 
