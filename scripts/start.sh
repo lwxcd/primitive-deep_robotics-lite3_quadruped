@@ -17,7 +17,6 @@ if [[ "${ROBONIX_LITE3_MODE:-hardware}" == "simulation" ]]; then
     -e ROBONIX_ATLAS="${ROBONIX_ATLAS:-127.0.0.1:50051}" \
     -e ROBONIX_META_GRPC_ENDPOINT="${ROBONIX_META_GRPC_ENDPOINT:-127.0.0.1:50051}" \
     -e ROS_DOMAIN_ID="${ROS_DOMAIN_ID:-42}" \
-    -e ROS_LOCALHOST_ONLY="${ROS_LOCALHOST_ONLY:-1}" \
     -e RMW_IMPLEMENTATION=rmw_fastrtps_cpp \
     "$container" bash -lc '
       source /opt/ros/humble/setup.bash
